@@ -1,0 +1,27 @@
+# 构建产物 / 发布文件
+*.exe
+*.rar
+dist/
+build/
+*.spec
+
+# 分析输出
+RH_Yield_*.xlsx
+Merged_Result*.xlsx
+merge_progress_*.json
+
+# 本地测试数据与配置
+263052_TR_MD25A1513.xlsx
+rh_yield_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Office 临时锁文件
+~$*
+
+# 调试临时文件
+_dbg*
+_mini*
+manual.pdf
