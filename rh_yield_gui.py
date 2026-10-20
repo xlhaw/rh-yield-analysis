@@ -864,26 +864,36 @@ def plot_channel_defect_pie(ax, channel_stats, title="By-Channel Defect"):
     """by-Channel DefectMap 下方的通道缺陷分布饼图。
 
     统计每个通道 (S1,H1..H32,S2) 在其全部 chip 上的主导缺陷码,
-    按主导码聚合通道数绘制饼图 (OK 通道也计入)。
+    按主导码聚合通道数绘制饼图。OK 通道与无数据通道不参与统计与显示,
+    饼图仅反映发生失败的通道的缺陷构成。
     """
     code_cnt = {}
+    has_data = False
     for hd in CHANNEL_ORDER:
         s = channel_stats.get(hd)
         if not s or s.get("total", 0) == 0:
             continue
-        dom = s.get("dominant") or "OK"
+        has_data = True
+        dom = s.get("dominant")
+        if not dom or dom == "OK":
+            continue
         code_cnt[dom] = code_cnt.get(dom, 0) + 1
-    if not code_cnt:
+    if not has_data:
         ax.text(0.5, 0.5, "No Data", ha="center", va="center", fontsize=11)
         ax.set_title(title, fontsize=10)
         ax.axis("off")
         return
-    # OK 优先, 其余按通道数降序
-    items = sorted(code_cnt.items(), key=lambda kv: (kv[0] != "OK", -kv[1]))
+    if not code_cnt:
+        ax.text(0.5, 0.5, "All Channels OK", ha="center", va="center",
+                fontsize=10, color=DEFECT_COLORS["OK"])
+        ax.set_title(title, fontsize=10)
+        ax.axis("off")
+        return
+    # 按通道数降序
+    items = sorted(code_cnt.items(), key=lambda kv: -kv[1])
     labels = [c for c, _ in items]
     sizes = [n for _, n in items]
-    colors = [DEFECT_COLORS["OK"] if c == "OK" else defect_color(c)
-              for c, _ in items]
+    colors = [defect_color(c) for c, _ in items]
     total = sum(sizes)
     wedges, texts, autotexts = ax.pie(
         sizes, labels=labels, colors=colors,
@@ -892,7 +902,7 @@ def plot_channel_defect_pie(ax, channel_stats, title="By-Channel Defect"):
     for t in autotexts:
         t.set_fontsize(7)
     ax.set_aspect("equal")
-    ax.set_title(f"{title}  (n={total} channels)", fontsize=10)
+    ax.set_title(f"{title}  (n={total} NG channels)", fontsize=10)
 
 
 # ── Excel 导出 ─────────────────────────────────────────────
