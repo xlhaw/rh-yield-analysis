@@ -737,9 +737,12 @@ def plot_grade_pie(ax, chips_df, wafer_filter="ALL", title="By-Chip Grade"):
 def defect_color(code):
     if code in DEFECT_COLORS:
         return DEFECT_COLORS[code]
-    # 未知缺陷码: 用 tab20 均匀上色
+    # 未知缺陷码: 用 tab20 均匀上色, 返回 hex 字符串 (openpyxl 需要)
     h = abs(hash(code)) % 20
-    return _DEFECT_CMAP(h)
+    rgba = _DEFECT_CMAP(h)
+    return "#{:02X}{:02X}{:02X}".format(int(rgba[0] * 255),
+                                       int(rgba[1] * 255),
+                                       int(rgba[2] * 255))
 
 
 def compute_channel_stats(judged, wafer_filter=None):
