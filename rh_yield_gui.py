@@ -483,13 +483,11 @@ def analyze(source, spec_groups, bj_limits=None, only_r_chip=True,
                 df = df.with_columns(pl.lit(None, dtype=pl.String).alias(c))
         m = _FILE_WAFER_CHIP.match(Path(f).name)
         fw, fc = (m.group(1), m.group(2)) if m else (None, None)
+        # WaferID / ChipID 始终以文件名为准 —— xlsx 内部 OCR/手录常出错
+        # (如 '146R06' 被误读为 '1A6R06', '5L0506' 被误录为数字 '509506')
         df = df.with_columns([
-            pl.when(pl.col("WaferID").is_null() |
-                    (pl.col("WaferID").cast(pl.String).str.strip_chars() == ""))
-            .then(pl.lit(fw)).otherwise(pl.col("WaferID").cast(pl.String)).alias("WaferID"),
-            pl.when(pl.col("ChipID").is_null() |
-                    (pl.col("ChipID").cast(pl.String).str.strip_chars() == ""))
-            .then(pl.lit(fc)).otherwise(pl.col("ChipID").cast(pl.String)).alias("ChipID"),
+            pl.lit(fw).alias("WaferID"),
+            pl.lit(fc).alias("ChipID"),
         ])
         df = df.with_columns(
             pl.col("WaferID").cast(pl.String).str.strip_chars().alias("WaferID"),
