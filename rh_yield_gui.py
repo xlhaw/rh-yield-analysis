@@ -903,7 +903,10 @@ def plot_channel_defect_pie(ax, channel_stats, title="By-Channel Defect"):
     统计每个通道 (S1,H1..H32,S2) 在其全部 chip 上的主导缺陷码,
     按主导码聚合通道数绘制饼图。OK 通道与无数据通道不参与统计与显示,
     饼图仅反映发生失败的通道的缺陷构成。
+    X+ / X- (Chip 级 R 均值越限) 不参与统计: 计算各通道主导码时先剔除
+    X+/X- 记录, 再在剩余缺陷码中取主导; 若剔除后该通道无缺陷则不计入。
     """
+    _X_CODES = ("X+", "X-")
     code_cnt = {}
     has_data = False
     for hd in CHANNEL_ORDER:
@@ -911,9 +914,12 @@ def plot_channel_defect_pie(ax, channel_stats, title="By-Channel Defect"):
         if not s or s.get("total", 0) == 0:
             continue
         has_data = True
-        dom = s.get("dominant")
-        if not dom or dom == "OK":
+        # 先排除 X+/X- 再取主导码, 避免 X Chip 把整片 HD 通道计入饼图
+        codes = {c: n for c, n in (s.get("codes") or {}).items()
+                 if c not in _X_CODES}
+        if not codes:
             continue
+        dom = max(codes, key=codes.get)
         code_cnt[dom] = code_cnt.get(dom, 0) + 1
     if not has_data:
         ax.text(0.5, 0.5, "No Data", ha="center", va="center", fontsize=11)
@@ -921,8 +927,8 @@ def plot_channel_defect_pie(ax, channel_stats, title="By-Channel Defect"):
         ax.axis("off")
         return
     if not code_cnt:
-        ax.text(0.5, 0.5, "All Channels OK", ha="center", va="center",
-                fontsize=10, color=DEFECT_COLORS["OK"])
+        ax.text(0.5, 0.5, "All Channels OK\n(X+/- excluded)", ha="center",
+                va="center", fontsize=10, color=DEFECT_COLORS["OK"])
         ax.set_title(title, fontsize=10)
         ax.axis("off")
         return
