@@ -41,10 +41,16 @@ from rh_yield_gui import (
   2. R: mean ±20% 为单通道上下限
   3. MR_Ratio: mean ±35% 为单通道上下限, LSL ≥ 4
   4. 若 3σ 后样本标准差 = 0, 回退用全体样本均值
+- **X+ / X- (Chip 级 R 均值越限)**:
+  1. 取该 Chip 32HD R 的 3σ 剔除后均值 `fmean`
+  2. 若 `fmean > R.USL` (静态上限, 默认 175) → 该 Chip 全部 HD 通道记为 `X+`
+  3. 若 `fmean < R.LSL` (静态下限, 默认 95) → 该 Chip 全部 HD 通道记为 `X-`
+  4. `X+`/`X-` 的 RejectPriority = `R.Priority - 1` (默认 0), 优先级高于 `R+`/`R-`, 会覆盖同 Chip 所有通道的其他缺陷码
+  5. 被 `X+`/`X-` 标记的 Chip 整 Chip 数据 (含 S1/S2) 不参与 Density 密度图与 3σ 统计
 - **Chip Grade**:
   - A = 32HD 全 OK 且 S1&S2 OK
   - B = S1&S2 OK 且 32HD OK 数 ∈ {30, 31}
-  - 其余 NG, 报告根因
+  - 其余 NG, 报告根因 (X Chip 根因为 `X+`/`X-`)
 
 ## Excel 报告 (write_excel)
 

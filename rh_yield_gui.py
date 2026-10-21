@@ -78,6 +78,7 @@ GRADE_ORDER = ["A", "B", "NG"]
 DEFECT_COLORS = {
     "OK": "#4CAF50",
     "R-": "#E57373", "R+": "#EF5350",
+    "X-": "#7B1FA2", "X+": "#6A1B9A",
     "MR-": "#FF8A65", "MR+": "#FF7043",
     "A-": "#FFB74D", "A+": "#FFA726",
     "PIN": "#9575CD", "SPIN": "#7E57C2",
@@ -269,8 +270,11 @@ def compute_dynamic_limits_32hd(data, specs):
     R → 均值±20%, MR_Ratio → 均值±35% (LSL≥4)。
     全部相同/为空时 LSL/USL 留空 (回退 DefectCode 标量)。
 
+    对 R 额外计算 X+/X-: 若 3σ 剔除后均值低于静态 R LSL 记 'X-',
+    高于静态 R USL 记 'X+', 否则 None。X+/- 优先级高于 R+/-。
+
     返回 DataFrame: WaferID, ChipID, {col}__LSL, {col}__USL,
-                    {col}__mean, {col}__keep_n, {col}__n
+                    {col}__mean, {col}__keep_n, {col}__n, {col}__X_code (仅 R)
     """
     hd = data.filter(pl.col("Hd").is_in(HD_CHANNELS))
     target = {s["ColumnName"]: s for s in specs if s["ShortName"] in ("R", "MR_Ratio")}
@@ -305,6 +309,14 @@ def compute_dynamic_limits_32hd(data, specs):
                 fmean = filtered.mean() if keep_n > 0 else mean0
             if spec["ShortName"] == "R":
                 lsl, usl = fmean * 0.80, fmean * 1.20
+                # X+/-: 3σ 剔除后均值超过静态 R 规格上下限
+                s_lsl, s_usl = spec["LSL"], spec["USL"]
+                x_code = None
+                if s_lsl is not None and fmean < s_lsl:
+                    x_code = "X-"
+                elif s_usl is not None and fmean > s_usl:
+                    x_code = "X+"
+                row[f"{col}__X_code"] = x_code
             else:
                 lsl, usl = max(fmean * 0.65, 4.0), fmean * 1.35
             row.update({lsl_c: lsl, usl_c: usl, mean_c: fmean,
@@ -552,6 +564,28 @@ def analyze(source, spec_groups, bj_limits=None, only_r_chip=True, progress_cb=N
         hd_data, spec_groups["32HD"],
         extra_limits=extra_hd, limit_override_cols=limit_cols)
     ss_judged, ss_code_prio = judge_group(ss_data, spec_groups["S1S2"])
+
+    # ── X+/- chip 级覆盖 (优先级在 R+/- 之前) ──
+    # 当 Chip 的 32HD R 3σ 剔除后均值超过静态 R 规格上下限时,
+    # 该 Chip 全部 HD 通道记为 X+/X-, 优先级 = R.Priority - 1。
+    r_spec_x = next((s for s in spec_groups["32HD"] if s["ShortName"] == "R"), None)
+    x_col = f"{r_spec_x['ColumnName']}__X_code" if r_spec_x else None
+    if (dynamic_limits.height > 0 and x_col
+            and x_col in dynamic_limits.columns):
+        x_df = dynamic_limits.filter(pl.col(x_col).is_not_null())
+        if x_df.height > 0:
+            x_prio = (r_spec_x["Priority"] - 1) if r_spec_x["Priority"] is not None else 0
+            x_map = x_df.select(["WaferID", "ChipID", x_col])
+            hd_judged = hd_judged.join(x_map, on=["WaferID", "ChipID"], how="left")
+            cond = (pl.col(x_col).is_not_null()
+                    & (pl.col("_PRIO").is_null() | (pl.col("_PRIO") > x_prio)))
+            hd_judged = hd_judged.with_columns(
+                pl.when(cond).then(pl.col(x_col))
+                .otherwise(pl.col("CODE")).alias("CODE"),
+                pl.when(cond).then(pl.lit(x_prio))
+                .otherwise(pl.col("_PRIO")).alias("_PRIO"),
+            ).drop(x_col)
+            hd_code_prio = {**hd_code_prio, x_prio: "X"}
 
     code_prio = {**hd_code_prio, **ss_code_prio}
 
@@ -1349,6 +1383,16 @@ def write_excel(result, save_path):
     judged = result["judged"]
     hd_vals = judged.filter(pl.col("Hd").is_in(HD_CHANNELS))
     ss_vals = judged.filter(pl.col("Hd").is_in(SS_CHANNELS))
+    # 密度图与统计需先排除 X+/X- (Chip 级 R 均值超规格) 的整 Chip 数据
+    dyn = result.get("dynamic_limits")
+    _r_spec = next((s for s in specs32 if s["ShortName"] == "R"), None)
+    _x_col = f"{_r_spec['ColumnName']}__X_code" if _r_spec else None
+    if dyn is not None and _x_col and _x_col in dyn.columns:
+        x_df = dyn.filter(pl.col(_x_col).is_not_null()
+                         ).select(["WaferID", "ChipID"])
+        if x_df.height > 0:
+            hd_vals = hd_vals.join(x_df, on=["WaferID", "ChipID"], how="anti")
+            ss_vals = ss_vals.join(x_df, on=["WaferID", "ChipID"], how="anti")
     targets = ["R", "MR_Ratio", "ASYM", "BJMP2%"]
     # 布局: 行=参数, 列=分组 (左 32HD / 右 S1S2), 每图占 21 行
     groups = [("32HD", specs32, hd_vals, "A"),
