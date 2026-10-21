@@ -263,7 +263,7 @@ def build_ng_expr(col, spec, lsl_expr=None, usl_expr=None):
     return expr
 
 
-def compute_dynamic_limits_32hd(data, specs):
+def compute_dynamic_limits_32hd(data, specs, x_r_limits=None):
     """按 Chip 计算 32HD 'R' 与 'MR_Ratio' 的动态上下限。
 
     每个 Chip 用自身 32 个 HD 通道数据: 先剔除 3*Sigma 外值, 求均值,
@@ -272,6 +272,8 @@ def compute_dynamic_limits_32hd(data, specs):
 
     对 R 额外计算 X+/X-: 若 3σ 剔除后均值低于静态 R LSL 记 'X-',
     高于静态 R USL 记 'X+', 否则 None。X+/- 优先级高于 R+/-。
+    x_r_limits: {'LSL': float|None, 'USL': float|None} 覆盖 X+/- 判定
+                用的静态 R 上下限; 为 None 时用 DefectCode 中的值。
 
     返回 DataFrame: WaferID, ChipID, {col}__LSL, {col}__USL,
                     {col}__mean, {col}__keep_n, {col}__n, {col}__X_code (仅 R)
@@ -309,8 +311,12 @@ def compute_dynamic_limits_32hd(data, specs):
                 fmean = filtered.mean() if keep_n > 0 else mean0
             if spec["ShortName"] == "R":
                 lsl, usl = fmean * 0.80, fmean * 1.20
-                # X+/-: 3σ 剔除后均值超过静态 R 规格上下限
-                s_lsl, s_usl = spec["LSL"], spec["USL"]
+                # X+/-: 3σ 剔除后均值超过静态 R 规格上下限 (GUI 可覆盖)
+                if x_r_limits:
+                    s_lsl = x_r_limits.get("LSL") or spec["LSL"]
+                    s_usl = x_r_limits.get("USL") or spec["USL"]
+                else:
+                    s_lsl, s_usl = spec["LSL"], spec["USL"]
                 x_code = None
                 if s_lsl is not None and fmean < s_lsl:
                     x_code = "X-"
@@ -431,11 +437,14 @@ def parse_lot_wafer(source, files):
     return "_".join(tokens), lot_no, wafer_id
 
 
-def analyze(source, spec_groups, bj_limits=None, only_r_chip=True, progress_cb=None):
+def analyze(source, spec_groups, bj_limits=None, only_r_chip=True,
+            x_r_limits=None, progress_cb=None):
     """分析数据源, 返回 result dict。
 
     bj_limits: {'32HD': {'BJMP%': (None, UL), 'BJMP2%': (None, UL)}}
                DefectCode 未给定 Spec 的 32HD BJ 参数手动上限。
+    x_r_limits: {'LSL': float|None, 'USL': float|None}
+                覆盖 X+/- 判定用的静态 R 上下限; 为 None 时用 DefectCode 值。
     """
     bj_limits = bj_limits or {}
     files = collect_data_files(source)
@@ -545,7 +554,8 @@ def analyze(source, spec_groups, bj_limits=None, only_r_chip=True, progress_cb=N
     ss_data = data.filter(pl.col("Hd").is_in(SS_CHANNELS))
 
     # 32HD 'R' / 'MR_Ratio' 动态限 (按 Chip: 每 Chip 自身 32 个 HD 通道统计)
-    dynamic_limits = compute_dynamic_limits_32hd(data, spec_groups["32HD"])
+    dynamic_limits = compute_dynamic_limits_32hd(
+        data, spec_groups["32HD"], x_r_limits=x_r_limits)
 
     # 将按 Chip 的限列 join 到 hd_data, 单次判定 (向量化)
     limit_cols = {}
@@ -673,6 +683,7 @@ def analyze(source, spec_groups, bj_limits=None, only_r_chip=True, progress_cb=N
         "code_prio": code_prio,
         "spec_groups": spec_groups,
         "bj_limits": bj_limits,
+        "x_r_limits": x_r_limits,
         "dynamic_limits": dynamic_limits,
         "source": str(source),
         "analyzed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -782,12 +793,21 @@ def defect_color(code):
 def compute_channel_stats(judged, wafer_filter=None):
     """统计每个通道 (S1, H1..H32, S2)  across chips 的 OK/失败分布。
 
-    返回 dict: {Hd: {"total": n, "ok": ok, "fail": fail, "dominant": code,
-                      "codes": {code: count}, "yield": yield_pct}}
+    X+/X- (Chip 级 R 均值越限) 的 Chip 整片排除 (含 S1/S2 通道)。
+    返回 (stats, x_ng):
+      stats: {Hd: {"total": n, "ok": ok, "fail": fail, "dominant": code,
+                   "codes": {code: count}, "yield": yield_pct}}
+      x_ng:  被 X+/X- 排除的 Chip 数
     """
     df = judged
     if wafer_filter and wafer_filter != "ALL":
         df = df.filter(pl.col("WaferID") == wafer_filter)
+    # 排除 X+/X- Reject 的 Chip (整 Chip 数据, 含 S1/S2)
+    x_chips = df.filter(pl.col("CODE").is_in(["X+", "X-"])
+                        ).select(["WaferID", "ChipID"]).unique()
+    x_ng = x_chips.height
+    if x_ng > 0:
+        df = df.join(x_chips, on=["WaferID", "ChipID"], how="anti")
     stats = {}
     for hd in CHANNEL_ORDER:
         sub = df.filter(pl.col("Hd") == hd)
@@ -807,7 +827,7 @@ def compute_channel_stats(judged, wafer_filter=None):
             "dominant": dominant, "codes": code_cnt,
             "yield": ok / total * 100,
         }
-    return stats
+    return stats, x_ng
 
 
 # CHANNEL_ORDER 中每个通道的列索引 (S1=0, H1=1, ..., H32=32, S2=33)
@@ -1241,7 +1261,7 @@ def write_excel(result, save_path):
     # ── Sheet 4: Channel Yield (by-Channel) ──
     ws4 = wb.create_sheet("Channel Yield")
     ch_headers = ["WaferID", "Hd", "Total", "OK", "Fail", "Yield%",
-                  "DominantDefect"]
+                  "DominantDefect", "X_NG_Chips"]
     for c, h in enumerate(ch_headers, 1):
         cell = ws4.cell(row=1, column=c, value=h)
         cell.font = header_font
@@ -1251,12 +1271,18 @@ def write_excel(result, save_path):
     row = 2
     wafers = [r["WaferID"] for r in result["wafer_summary"].rows(named=True)]
     for wid in wafers:
-        ch_stats = compute_channel_stats(result["judged"], wafer_filter=wid)
+        ch_stats, x_ng = compute_channel_stats(result["judged"],
+                                               wafer_filter=wid)
+        if x_ng > 0:
+            c = ws4.cell(row=row, column=1,
+                         value=f"Wafer: {wid}  X NG Chips (R均值越限, 已排除): {x_ng}")
+            c.font = Font(bold=True, color="CC0000")
+            row += 1
         for hd in CHANNEL_ORDER:
             s = ch_stats.get(hd, {})
             vals = [wid, hd, s.get("total", 0), s.get("ok", 0),
                     s.get("fail", 0), round(s.get("yield") or 0, 2),
-                    s.get("dominant", "-")]
+                    s.get("dominant", "-"), x_ng]
             for c, v in enumerate(vals, 1):
                 cell = ws4.cell(row=row, column=c, value=v)
                 cell.border = thin
@@ -1321,12 +1347,15 @@ def write_excel(result, save_path):
     cur_row = 1
     for wid in wafers:
         grid_data = generate_channel_grid(result["judged"], wafer_id=wid)
-        ch_stats = compute_channel_stats(result["judged"], wafer_filter=wid)
+        ch_stats, x_ng = compute_channel_stats(result["judged"],
+                                               wafer_filter=wid)
         total_ok = sum(s["ok"] for s in ch_stats.values())
         total_n = sum(s["total"] for s in ch_stats.values())
         yld = total_ok / total_n * 100 if total_n else 0
+        x_note = f"  X NG Chips: {x_ng}" if x_ng > 0 else ""
         ws6.cell(row=cur_row, column=1,
-                 value=f"Wafer: {wid}  Channel Yield: {yld:.1f}%").font = Font(bold=True, size=12)
+                 value=f"Wafer: {wid}  Channel Yield: {yld:.1f}%{x_note}"
+                 ).font = Font(bold=True, size=12)
         cur_row += 1
         if grid_data is None:
             ws6.cell(row=cur_row, column=1, value="(no data)")
@@ -1664,6 +1693,18 @@ class RHYieldApp:
         ttk.Checkbutton(frame, text="仅统计 ChipID 含 'R' 的 Chip",
                         variable=self.only_r_var).pack(anchor=tk.W, pady=(5, 0))
 
+        # X+/- 判定用 R 均值静态限 (默认取 DefectCode R 的 LSL/USL)
+        x_frame = ttk.Frame(frame)
+        x_frame.pack(fill=tk.X, pady=(3, 0))
+        ttk.Label(x_frame, text="X+/- R均值 LSL:").pack(side=tk.LEFT)
+        self.x_lsl_var = tk.StringVar()
+        ttk.Entry(x_frame, textvariable=self.x_lsl_var, width=7).pack(
+            side=tk.LEFT, padx=(2, 6))
+        ttk.Label(x_frame, text="USL:").pack(side=tk.LEFT)
+        self.x_usl_var = tk.StringVar()
+        ttk.Entry(x_frame, textvariable=self.x_usl_var, width=7).pack(
+            side=tk.LEFT, padx=(2, 0))
+
         ttk.Label(frame, text="Wafer:").pack(anchor=tk.W, pady=(5, 0))
         self.wafer_combo = ttk.Combobox(frame, textvariable=self._wafer_var,
                                         state="readonly")
@@ -1775,6 +1816,14 @@ class RHYieldApp:
                 s["LSL"] if s["LSL"] is not None else "/",
                 s["USL"] if s["USL"] is not None else "/",
                 codes or "/", used))
+        # 默认 X+/- R 均值限取自 DefectCode R
+        r_spec = next((s for s in self.spec_groups["32HD"]
+                       if s["ShortName"] == "R"), None)
+        if r_spec:
+            if r_spec["LSL"] is not None:
+                self.x_lsl_var.set(str(r_spec["LSL"]))
+            if r_spec["USL"] is not None:
+                self.x_usl_var.set(str(r_spec["USL"]))
 
     def _save_current_config(self):
         self.cfg["source"] = self.src_var.get()
@@ -1798,6 +1847,17 @@ class RHYieldApp:
         self.root.configure(cursor="watch")
         only_r = self.only_r_var.get()
 
+        # 解析 X+/- R 均值限 (空则使用 DefectCode 默认)
+        def _parse_f(s):
+            s = s.strip()
+            return float(s) if s else None
+        try:
+            x_lsl = _parse_f(self.x_lsl_var.get())
+            x_usl = _parse_f(self.x_usl_var.get())
+        except ValueError:
+            x_lsl = x_usl = None
+        x_r_limits = {"LSL": x_lsl, "USL": x_usl} if (x_lsl is not None or x_usl is not None) else None
+
         import queue
         self._result_q = queue.Queue()
 
@@ -1807,6 +1867,7 @@ class RHYieldApp:
                     source, self.spec_groups,
                     bj_limits={},
                     only_r_chip=only_r,
+                    x_r_limits=x_r_limits,
                     progress_cb=lambda i, n: self._progress(i, n))
             except Exception as e:
                 import traceback
@@ -1894,10 +1955,13 @@ class RHYieldApp:
             pl.col("CNT").sum().alias("CNT")).sort("CNT", descending=True)
         for x in cause.rows(named=True):
             lines.append(f"  {x['ROOT_CODE']:<10}: {x['CNT']}")
-        # by-Channel 良率 (仅列出有失败的通道)
-        ch = compute_channel_stats(r["judged"], wafer_filter=self._wafer_var.get())
+        # by-Channel 良率 (仅列出有失败的通道; X+/X- Chip 已排除)
+        ch, x_ng = compute_channel_stats(r["judged"],
+                                         wafer_filter=self._wafer_var.get())
         fail_chs = [(hd, s) for hd, s in ch.items()
                     if s.get("total", 0) > 0 and s.get("fail", 0) > 0]
+        if x_ng > 0:
+            lines.append(f"X NG Chips (R均值越限, 已排除): {x_ng}")
         if fail_chs:
             lines.append("=" * 52)
             lines.append("by-Channel 失败通道 (良率 / 主导缺陷):")
@@ -1953,13 +2017,14 @@ class RHYieldApp:
         ax_ch = self.fig.add_subplot(gs[0:nrows, ncols])
         ch_wid = None if selected == "ALL" else selected
         ch_grid = generate_channel_grid(judged, wafer_id=ch_wid)
-        ch_stats = compute_channel_stats(judged, wafer_filter=selected)
+        ch_stats, x_ng = compute_channel_stats(judged, wafer_filter=selected)
         total_ok = sum(s["ok"] for s in ch_stats.values())
         total_n = sum(s["total"] for s in ch_stats.values())
         total_yld = total_ok / total_n * 100 if total_n else 0
+        x_note = f"  X NG: {x_ng}" if x_ng > 0 else ""
         plot_channel_map(ax_ch, ch_grid,
                          title=f"By-Channel Defect Map ({selected})  "
-                               f"Yield: {total_yld:.1f}%")
+                               f"Yield: {total_yld:.1f}%{x_note}")
 
         # 两个 DefectMap 下方: 对应 Pie Chart
         ax_pie_chip = self.fig.add_subplot(gs[nrows, 0:ncols])
