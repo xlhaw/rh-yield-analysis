@@ -1151,20 +1151,23 @@ def write_excel(result, save_path):
         row += 1
     row += 1
 
-    # By-Channel Defect 统计 (排除 X+/X- Chip, 行=通道, 列=缺陷码)
+    # By-Channel Defect 汇总 (排除 X+/X- Chip, 分 32HD / S1S2 两组)
     ch_stats, x_ng_all = compute_channel_stats(result["judged"],
                                                wafer_filter=None)
     x_note = f"  (X NG Chips 已排除: {x_ng_all})" if x_ng_all else ""
     ws.cell(row=row, column=1,
             value=f"By-Channel Defect{x_note}").font = Font(bold=True, size=12)
     row += 1
-    # 收集全部缺陷码, 按出现频次降序排列
-    all_codes = {}
-    for s in ch_stats.values():
+    # 分组合计: 32HD = H1..H32, S1S2 = S1, S2
+    grp_hd = {c: 0 for c in set()}
+    grp_ss = {}
+    for hd, s in ch_stats.items():
+        tgt = grp_ss if hd in ("S1", "S2") else grp_hd
         for c, n in (s.get("codes") or {}).items():
-            all_codes[c] = all_codes.get(c, 0) + n
-    code_cols = sorted(all_codes, key=lambda c: -all_codes[c])
-    bh = ["Channel", "Total", "OK", "Fail", "Yield%"] + code_cols
+            tgt[c] = tgt.get(c, 0) + n
+    all_codes = sorted(set(list(grp_hd) + list(grp_ss)),
+                       key=lambda c: -(grp_hd.get(c, 0) + grp_ss.get(c, 0)))
+    bh = ["Group", "Total", "OK", "Fail", "Yield%"] + all_codes
     for c, h in enumerate(bh, 1):
         cell = ws.cell(row=row, column=c, value=h)
         cell.font = header_font
@@ -1172,11 +1175,13 @@ def write_excel(result, save_path):
         cell.alignment = center
         cell.border = thin
     row += 1
-    for hd in CHANNEL_ORDER:
-        s = ch_stats.get(hd, {})
-        vals = [hd, s.get("total", 0), s.get("ok", 0), s.get("fail", 0),
-                round(s.get("yield") or 0, 2)]
-        vals += [s.get("codes", {}).get(c, 0) for c in code_cols]
+    for label, hd_set in (("32HD", HD_CHANNELS), ("S1S2", ("S1", "S2"))):
+        n = sum(ch_stats[hd]["total"] for hd in hd_set)
+        ok = sum(ch_stats[hd]["ok"] for hd in hd_set)
+        fail = n - ok
+        codes = grp_ss if label == "S1S2" else grp_hd
+        vals = [label, n, ok, fail, round(ok / n * 100, 2) if n else 0]
+        vals += [codes.get(c, 0) for c in all_codes]
         for c, v in enumerate(vals, 1):
             ws.cell(row=row, column=c, value=v).border = thin
             ws.cell(row=row, column=c).alignment = center
@@ -1185,9 +1190,10 @@ def write_excel(result, save_path):
     tot_n = sum(s.get("total", 0) for s in ch_stats.values())
     tot_ok = sum(s.get("ok", 0) for s in ch_stats.values())
     tot_fail = tot_n - tot_ok
+    merged = {c: grp_hd.get(c, 0) + grp_ss.get(c, 0) for c in all_codes}
     tv = ["TOTAL", tot_n, tot_ok, tot_fail,
           round(tot_ok / tot_n * 100, 2) if tot_n else 0]
-    tv += [all_codes.get(c, 0) for c in code_cols]
+    tv += [merged[c] for c in all_codes]
     for c, v in enumerate(tv, 1):
         cell = ws.cell(row=row, column=c, value=v)
         cell.font = Font(bold=True)
