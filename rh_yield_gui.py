@@ -1149,6 +1149,51 @@ def write_excel(result, save_path):
             ws.cell(row=row, column=c, value=v).border = thin
             ws.cell(row=row, column=c).alignment = center
         row += 1
+    row += 1
+
+    # By-Channel Defect 统计 (排除 X+/X- Chip, 行=通道, 列=缺陷码)
+    ch_stats, x_ng_all = compute_channel_stats(result["judged"],
+                                               wafer_filter=None)
+    x_note = f"  (X NG Chips 已排除: {x_ng_all})" if x_ng_all else ""
+    ws.cell(row=row, column=1,
+            value=f"By-Channel Defect{x_note}").font = Font(bold=True, size=12)
+    row += 1
+    # 收集全部缺陷码, 按出现频次降序排列
+    all_codes = {}
+    for s in ch_stats.values():
+        for c, n in (s.get("codes") or {}).items():
+            all_codes[c] = all_codes.get(c, 0) + n
+    code_cols = sorted(all_codes, key=lambda c: -all_codes[c])
+    bh = ["Channel", "Total", "OK", "Fail", "Yield%"] + code_cols
+    for c, h in enumerate(bh, 1):
+        cell = ws.cell(row=row, column=c, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center
+        cell.border = thin
+    row += 1
+    for hd in CHANNEL_ORDER:
+        s = ch_stats.get(hd, {})
+        vals = [hd, s.get("total", 0), s.get("ok", 0), s.get("fail", 0),
+                round(s.get("yield") or 0, 2)]
+        vals += [s.get("codes", {}).get(c, 0) for c in code_cols]
+        for c, v in enumerate(vals, 1):
+            ws.cell(row=row, column=c, value=v).border = thin
+            ws.cell(row=row, column=c).alignment = center
+        row += 1
+    # 汇总行
+    tot_n = sum(s.get("total", 0) for s in ch_stats.values())
+    tot_ok = sum(s.get("ok", 0) for s in ch_stats.values())
+    tot_fail = tot_n - tot_ok
+    tv = ["TOTAL", tot_n, tot_ok, tot_fail,
+          round(tot_ok / tot_n * 100, 2) if tot_n else 0]
+    tv += [all_codes.get(c, 0) for c in code_cols]
+    for c, v in enumerate(tv, 1):
+        cell = ws.cell(row=row, column=c, value=v)
+        cell.font = Font(bold=True)
+        cell.alignment = center
+        cell.border = thin
+    row += 1
     for i in range(1, 9):
         ws.column_dimensions[_col_letter(i)].width = 13
 
