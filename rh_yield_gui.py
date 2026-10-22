@@ -675,6 +675,7 @@ def analyze(source, spec_groups, bj_limits=None, only_r_chip=True,
     return {
         "files": files,
         "errors": errors,
+        "raw_data": data,
         "judged": judged,
         "chips": chips,
         "wafer_summary": wafer_sum,
@@ -1076,6 +1077,45 @@ def _nice_axis_range(lo, hi):
     if n_hi <= n_lo:
         n_hi = n_lo + step
     return n_lo, n_hi
+
+
+def export_raw_data(result, save_path):
+    """导出合并后的原始测试数据, 列名用 DefectCode ShortName 替换 ColumnName。
+
+    非参数列 (WaferID, ChipID, Hd, TestTime, _FILE) 保留原名。
+    参数列按 spec_groups 的 ShortName/ColumnName 映射改名。
+    """
+    data = result["raw_data"]
+    spec_groups = result["spec_groups"]
+    # 构建 ColumnName -> ShortName 映射 (只对 ColumnName 非空项)
+    col_rename = {}
+    for g in ("32HD", "S1S2"):
+        for s in spec_groups[g]:
+            cn = s.get("ColumnName")
+            sn = s.get("ShortName")
+            if cn and sn and cn in data.columns and cn != sn:
+                col_rename[cn] = sn
+    # 先保留需要的非参数列在前, 再跟参数列
+    fixed_cols = [c for c in ("WaferID", "ChipID", "Hd", "TestTime", "_FILE")
+                  if c in data.columns]
+    seen = set(fixed_cols)
+    # 参数列 (按 spec_groups 出现顺序, 且在 data 中存在)
+    param_cols = []
+    for g in ("32HD", "S1S2"):
+        for s in spec_groups[g]:
+            cn = s.get("ColumnName")
+            sn = s.get("ShortName")
+            use = cn if cn else sn
+            if use and use in data.columns and use not in seen:
+                param_cols.append(use)
+                seen.add(use)
+    # 其他没在 spec 里的列 (如 R(Ohm), Voltage(mV) 等) 也带上, 但放最后
+    rest = [c for c in data.columns if c not in seen]
+    ordered = fixed_cols + param_cols + rest
+    out = data.select(ordered)
+    if col_rename:
+        out = out.rename(col_rename)
+    out.write_excel(save_path, worksheet="Raw")
 
 
 def write_excel(result, save_path):
@@ -1768,6 +1808,8 @@ class RHYieldApp:
         self.analyze_btn = ttk.Button(btn_frame, text="开始分析", command=self._analyze)
         self.analyze_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         ttk.Button(btn_frame, text="导出 Excel", command=self._export).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2))
+        ttk.Button(btn_frame, text="导出原始数据", command=self._export_raw).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
     def _build_spec_panel(self, parent):
@@ -2108,6 +2150,28 @@ class RHYieldApp:
             self.root.update()
             write_excel(self.result, path)
             messagebox.showinfo("Success", f"已保存:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+        finally:
+            self.root.configure(cursor="")
+
+    def _export_raw(self):
+        if not self.result:
+            messagebox.showwarning("Warning", "请先执行分析")
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stem = self.result.get("file_stem") or "RH"
+        default = f"{stem}_Raw_{stamp}.xlsx"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx", initialfile=default,
+            filetypes=[("Excel files", "*.xlsx")])
+        if not path:
+            return
+        try:
+            self.root.configure(cursor="watch")
+            self.root.update()
+            export_raw_data(self.result, path)
+            messagebox.showinfo("Success", f"已保存原始数据:\n{path}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
         finally:
