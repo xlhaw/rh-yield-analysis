@@ -328,7 +328,9 @@ def compute_dynamic_limits_32hd(data, specs, x_r_limits=None):
             row.update({lsl_c: lsl, usl_c: usl, mean_c: fmean,
                         keep_c: int(keep_n), n_c: int(n)})
         rows.append(row)
-    return pl.DataFrame(rows) if rows else pl.DataFrame(
+    # X_code 列多数行为 None、少数为 'X+'/'X-'，polars 按前 N 行推断会误判为
+    # Null 类型导致后续 append 失败。infer_schema_length=None 强制扫全表。
+    return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame(
         schema={"WaferID": pl.String, "ChipID": pl.String})
 
 
